@@ -21,6 +21,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time;
+use std::sync::Arc;
 
 use std::convert::TryFrom;
 
@@ -44,6 +45,16 @@ use rustboyadvance_core::cartridge::BackupType;
 use rustboyadvance_core::prelude::*;
 use rustboyadvance_core::util::spawn_and_run_gdb_server;
 use rustboyadvance_core::util::FpsCounter;
+
+use serenity::{
+    Client, client::bridge::gateway::GatewayIntents, async_trait,
+    prelude::*,
+    model::{prelude::Message}
+};
+
+use tokio::spawn;
+
+use crossbeam_queue::ArrayQueue;
 
 const LOG_DIR: &str = ".logs";
 const DEFAULT_GDB_SERVER_ADDR: &'static str = "localhost:1337";
@@ -104,7 +115,11 @@ fn ask_download_bios() {
     println!("Missing BIOS file. If you don't have the original GBA BIOS, you can download an open-source bios from {}", OPEN_SOURCE_BIOS_URL);
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+
+fn main_2(conc_queue : Arc<ArrayQueue<Scancode>> ) -> Result<(), Box<dyn std::error::Error>> {
+    let queue = conc_queue.clone();
+    println!("initiated main_2");
     fs::create_dir_all(LOG_DIR).expect(&format!("could not create log directory ({})", LOG_DIR));
     flexi_logger::Logger::with_env_or_str("info")
         .log_to_file()
@@ -115,16 +130,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .start()
         .unwrap();
 
+    println!("initiated main_2 2");
     let mut frame_limiter = true;
     let yaml = load_yaml!("cli.yml");
+    println!("initiated main_2 3");
     let matches = clap::App::from_yaml(yaml).get_matches();
 
+    println!("initiated main_2 4");
     let bios_path = Path::new(matches.value_of("bios").unwrap_or_default());
     let bios_bin = match read_bin_file(bios_path) {
         Ok(bios) => bios.into_boxed_slice(),
         _ => {
             ask_download_bios();
-            std::process::exit(0);
+            println!("exiting");
+            return Ok(())
+            //std::process::exit(0);
         }
     };
 
@@ -243,8 +263,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut fps_counter = FpsCounter::default();
     let frame_time = time::Duration::new(0, 1_000_000_000u32 / 60);
+
+    let mut last_code = Scancode::X;
+    let mut queueing_keyup = false;
     'running: loop {
         let start_time = time::Instant::now();
+
+        if queueing_keyup {
+            input.borrow_mut().on_keyboard_key_up(last_code);
+            queueing_keyup = false;
+        }
+        else {
+            match queue.pop() {
+                Some(scan_code) => {
+                    last_code = scan_code;
+                    input.borrow_mut().on_keyboard_key_down(scan_code);
+                    queueing_keyup = true;
+                }
+                ,_ => {}
+            }
+        }
 
         for event in event_pump.poll_iter() {
             match event {
@@ -365,6 +403,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
         }
     }
+    Ok (())
+}
 
-    Ok(())
+
+struct KeyRecommendations;
+impl TypeMapKey for KeyRecommendations {
+    type Value = Arc<ArrayQueue<Scancode>>;
+}
+
+struct Handler;
+#[async_trait]
+impl EventHandler for Handler {
+    async fn message(&self, ctx: Context, msg: Message) {
+        let queue = {
+            let data_read = ctx.data.read().await;
+            data_read
+                .get::<KeyRecommendations>()
+                .expect("Expected KeyRecommendations in TypeMap.")
+                .clone()
+        };
+        // see the README.md for the key bindings
+        match msg.content {
+            x if x == "a" => {queue.push(Scancode::X); println!("got a")}
+            x if x == "b" => {queue.push(Scancode::Z); println!("got b")}
+            x if x == "up" => {queue.push(Scancode::Up); println!("got up")}
+            x if x == "down" => {queue.push(Scancode::Down); println!("got down")}
+            x if x == "left" => {queue.push(Scancode::Left); println!("got left")}
+            x if x == "right" => {queue.push(Scancode::Right); println!("got right")}
+            x if x == "start" => {queue.push(Scancode::Return); println!("got return")}
+            x if x == "select" => {queue.push(Scancode::Backspace); println!("got backspace")}
+            x if x == "l" => {queue.push(Scancode::A); println!("got l")}
+            x if x == "r" => {queue.push(Scancode::S); println!("got r")}
+            _ => {}
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+
+    let q = Arc::new(ArrayQueue::<Scancode>::new(15));
+    let token = std::env::var("DISCORD_PLAYS_GBA_TOKEN")
+    .expect("Expected environment variable 'DISCORD_PLAYS_GBA_TOKEN'");
+
+    let mut client = Client::builder(token)
+        .event_handler(Handler)
+        .intents(GatewayIntents::GUILDS|GatewayIntents::GUILD_MESSAGES)
+        .await
+        .expect("Error creating client");
+    {
+        let mut data = client.data.write().await;
+        data.insert::<KeyRecommendations>(q.clone())
+    }
+
+    spawn(async move {client.start().await});
+    main_2(q);
 }

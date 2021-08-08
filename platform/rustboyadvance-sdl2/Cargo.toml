@@ -15,6 +15,10 @@ flexi_logger = { version = "0.14", features = ["colors"] }
 bit = "^0.1"
 spin_sleep = "0.3.7"
 
+tokio = {version = "1.9.0", features = ["full"] }
+serenity = {version = "0.10.8", default-features = false, features = ["builder", "client", "gateway", "model", "utils", "rustls_backend"] }
+crossbeam-queue = "0.3.2"
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
